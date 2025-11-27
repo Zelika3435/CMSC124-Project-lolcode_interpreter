@@ -1,19 +1,34 @@
 """
 LOLCODE Interpreter GUI
-CMSC 124 Project - Tkinter Frontend
+=======================
+
+Graphical front-end for the CMSC 124 LOLCODE interpreter. Provides the file
+explorer, editable source pane, token list, symbol table, console I/O, and
+execution controls required by the 2025 CMSC 124 project specification.
+
+This module focuses solely on GUI responsibilities (Tkinter widgets, layout,
+and user interactions) while delegating lexical analysis to
+`lolcode_interpreter.py`.
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, scrolledtext
+from tkinter import ttk, filedialog, scrolledtext, messagebox
 import os
+import re
+
+from lolcode_interpreter import lolcode_lexer
 
 
 class LOLCodeInterpreterGUI:
+    """Tkinter GUI wrapper that wires together all dashboard components."""
     def __init__(self, root):
         self.root = root
         self.root.title("LOLCODE Interpreter - CMSC 124")
         self.root.geometry("1400x900")
         self.root.minsize(1200, 700)
+        self.current_file_path = None
+        self.unsaved_changes = False
+        self.suppress_modified_event = False
         
         # Configure style
         self.setup_styles()
@@ -81,6 +96,7 @@ class LOLCodeInterpreterGUI:
             selectforeground='#ffffff'
         )
         self.code_editor.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.code_editor.bind('<<Modified>>', self.on_text_modified)
         
         # Add line numbers (placeholder - will be implemented later)
         line_numbers = tk.Text(
@@ -160,6 +176,22 @@ class LOLCodeInterpreterGUI:
         )
         self.run_btn.pack(side=tk.LEFT, padx=(0, 10))
         
+        self.save_btn = ttk.Button(
+            control_frame,
+            text="Save Changes",
+            command=self.save_changes,
+            width=15
+        )
+        self.save_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.undo_btn = ttk.Button(
+            control_frame,
+            text="Undo Changes",
+            command=self.undo_changes,
+            width=15
+        )
+        self.undo_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
         self.clear_btn = ttk.Button(
             control_frame,
             text="Clear Console",
@@ -209,7 +241,10 @@ class LOLCodeInterpreterGUI:
         submit_input_btn.grid(row=0, column=2)
         
     def browse_file(self):
-        """Placeholder for file browsing functionality"""
+        """Open file dialog and load selected LOLCODE file"""
+        if not self.confirm_discard_changes():
+            return
+
         file_path = filedialog.askopenfilename(
             title="Select LOLCODE File",
             filetypes=[("LOLCODE files", "*.lol"), ("All files", "*.*")],
@@ -217,9 +252,170 @@ class LOLCodeInterpreterGUI:
         )
         
         if file_path:
-            self.file_path_var.set(file_path)
-            # TODO: Load file content into editor
-            self.status_var.set(f"File loaded: {os.path.basename(file_path)}")
+            self.load_file(file_path)
+
+    def load_file(self, file_path):
+        """Load the selected file into the text editor"""
+        self.suppress_modified_event = True
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+        except UnicodeDecodeError:
+            messagebox.showerror("Encoding Error", "Unable to read file using UTF-8 encoding.")
+            self.suppress_modified_event = False
+            return
+        except OSError as exc:
+            messagebox.showerror("File Error", f"Unable to open file.\n\n{exc}")
+            self.suppress_modified_event = False
+            return
+
+        self.code_editor.delete(1.0, tk.END)
+        self.code_editor.insert(tk.END, content)
+        self.code_editor.edit_modified(False)
+        self.suppress_modified_event = False
+        self.file_path_var.set(file_path)
+        self.current_file_path = file_path
+        self.unsaved_changes = False
+        self.status_var.set(f"Loaded: {os.path.basename(file_path)}")
+        self.root.title(f"LOLCODE Interpreter - CMSC 124 · {os.path.basename(file_path)}")
+        self.code_editor.focus_set()
+        self.update_tokens_and_symbols(content)
+
+    def confirm_discard_changes(self):
+        """Prompt the user before discarding unsaved edits"""
+        if not self.unsaved_changes:
+            return True
+
+        return messagebox.askyesno(
+            "Discard changes?",
+            "You have unsaved changes in the current file.\n"
+            "Do you want to discard them and continue?"
+        )
+
+    def on_text_modified(self, event=None):
+        """Track editor modifications to support spec #2"""
+        if self.code_editor.edit_modified():
+            if self.suppress_modified_event:
+                self.code_editor.edit_modified(False)
+                return
+            self.unsaved_changes = True
+            filename = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
+            self.status_var.set(f"Editing: {filename} (modified)")
+            self.code_editor.edit_modified(False)
+    
+    def save_changes(self):
+        """Save the current editor content to disk"""
+        target_path = self.current_file_path
+        
+        if not target_path:
+            target_path = filedialog.asksaveasfilename(
+                title="Save LOLCODE File",
+                defaultextension=".lol",
+                filetypes=[("LOLCODE files", "*.lol"), ("All files", "*.*")]
+            )
+            if not target_path:
+                return
+            self.current_file_path = target_path
+            self.file_path_var.set(target_path)
+        
+        try:
+            content = self.code_editor.get(1.0, tk.END)
+            with open(target_path, 'w', encoding='utf-8') as file:
+                file.write(content.rstrip() + '\n')
+        except OSError as exc:
+            messagebox.showerror("Save Error", f"Unable to save file.\n\n{exc}")
+            return
+        
+        self.unsaved_changes = False
+        self.code_editor.edit_modified(False)
+        self.status_var.set(f"Saved: {os.path.basename(target_path)}")
+        self.root.title(f"LOLCODE Interpreter - CMSC 124 · {os.path.basename(target_path)}")
+        self.update_tokens_and_symbols(content)
+    
+    def undo_changes(self):
+        """Revert the editor content to the last saved version"""
+        if not self.current_file_path:
+            messagebox.showinfo("Undo not available", "No file is currently loaded.")
+            return
+        
+        if not self.confirm_discard_changes():
+            return
+        
+        self.load_file(self.current_file_path)
+
+    def update_tokens_and_symbols(self, code):
+        """Refresh the token list and symbol table when a file loads or saves"""
+        self.populate_tokens(code)
+        self.populate_symbol_table(code)
+
+    def populate_tokens(self, code):
+        """Fill the token list via the lexer"""
+        for child in self.tokens_tree.get_children():
+            self.tokens_tree.delete(child)
+
+        try:
+            tokens = list(lolcode_lexer(code))
+        except SyntaxError as exc:
+            messagebox.showerror("Lexer Error", f"{exc}")
+            self.status_var.set(f"Lexer error: {exc}")
+            return
+
+        for index, (token_type, token_value) in enumerate(tokens, start=1):
+            if token_type == 'EOF':
+                continue
+            display_value = token_value if token_value is not None else ''
+            self.tokens_tree.insert('', 'end', text=str(index), values=(token_type, display_value))
+
+    def populate_symbol_table(self, code):
+        """Very simple symbol table builder based on declarations inside WAZZUP"""
+        for child in self.symbol_tree.get_children():
+            self.symbol_tree.delete(child)
+
+        declarations = self.extract_variable_declarations(code)
+        for entry in declarations:
+            name = entry['name']
+            value = entry.get('value')
+            dtype = self.infer_value_type(value)
+            display_value = value if value is not None else ''
+            self.symbol_tree.insert('', 'end', text=name, values=(dtype, display_value))
+
+    def extract_variable_declarations(self, code):
+        """Scan the WAZZUP block for simple variable declarations"""
+        in_wazzup = False
+        declarations = []
+        for raw_line in code.splitlines():
+            line = raw_line.split('BTW')[0].strip()
+            if not line:
+                continue
+            if line.startswith('WAZZUP'):
+                in_wazzup = True
+                continue
+            if line.startswith('BUHBYE'):
+                in_wazzup = False
+                continue
+            if not in_wazzup:
+                continue
+
+            match = re.match(r'I\s+HAS\s+A\s+([A-Za-z][A-Za-z0-9_]*)\s*(?:ITZ\s+(.*))?$', line)
+            if match:
+                var_name = match.group(1)
+                var_value = match.group(2).strip() if match.group(2) else None
+                declarations.append({'name': var_name, 'value': var_value})
+        return declarations
+
+    def infer_value_type(self, value):
+        """Best-effort literal type detection for the symbol table"""
+        if not value:
+            return 'NOOB'
+        if value.startswith('"') and value.endswith('"'):
+            return 'YARN'
+        if re.fullmatch(r'-?\d+\.\d+', value):
+            return 'NUMBAR'
+        if re.fullmatch(r'-?\d+', value):
+            return 'NUMBR'
+        if value in ('WIN', 'FAIL'):
+            return 'TROOF'
+        return 'EXPR/VAR'
     
     def run_code(self):
         """Placeholder for code execution functionality"""
