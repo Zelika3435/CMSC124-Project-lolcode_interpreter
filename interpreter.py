@@ -16,13 +16,14 @@ class ReturnError(Exception):
 NOOB_VAL = Noob()
 
 class Interpreter:
-	def __init__(self, output_func=print, input_func=input):
+	def __init__(self, output_func=print, input_func=input, var_update_callback=None):
 		self.variables = {} # symbol table
 		self.variables['IT'] = NOOB_VAL
 		self.functions = {}
 		
 		self.input_func = input_func
 		self.output_func = output_func
+		self.var_update_callback = var_update_callback  # Callback for real-time symbol table updates
 	
 	def visit(self, node):
 		if node is None:
@@ -44,6 +45,8 @@ class Interpreter:
 
 			if val is not None:
 				self.variables['IT'] = val
+				if self.var_update_callback:
+					self.var_update_callback(self.variables.copy())
 		
 	def visit_VarDecl(self, node):
 		val = NOOB_VAL
@@ -51,6 +54,8 @@ class Interpreter:
 			val = self.visit(node.expr)
 		
 		self.variables[node.var_name] = val
+		if self.var_update_callback:
+			self.var_update_callback(self.variables.copy())
 	
 	def visit_Assignment(self, node):
 		if node.var_name not in self.variables:
@@ -58,6 +63,8 @@ class Interpreter:
 		
 		val = self.visit(node.expr)
 		self.variables[node.var_name] = val
+		if self.var_update_callback:
+			self.var_update_callback(self.variables.copy())
 	
 	def visit_Visible(self, node):
 		output = ""
@@ -163,6 +170,8 @@ class Interpreter:
 		
 		user_input = self.input_func()
 		self.variables[node.var_name] = user_input
+		if self.var_update_callback:
+			self.var_update_callback(self.variables.copy())
 	
 	def cast_value(self, val, target_type):
 		if val is NOOB_VAL:
@@ -244,6 +253,8 @@ class Interpreter:
 		new_val = self.cast_value(current_val, node.target_type)
 
 		self.variables[node.var_name] = new_val
+		if self.var_update_callback:
+			self.var_update_callback(self.variables.copy())
 	
 	def visit_IfStatement(self, node):
 		it_val = self.variables.get('IT', NOOB_VAL)
@@ -325,6 +336,8 @@ class Interpreter:
 					curr_num -= 1
 				
 				self.variables[node.var] = curr_num
+				if self.var_update_callback:
+					self.var_update_callback(self.variables.copy())
 		except GTFOError:
 			pass	
 	
@@ -373,4 +386,6 @@ class Interpreter:
 			self.variables = previous_variables
 
 		self.variables['IT'] = return_val
+		if self.var_update_callback:
+			self.var_update_callback(self.variables.copy())
 		return return_val

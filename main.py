@@ -20,6 +20,10 @@ class LOLCodeInterpreterGUI:
 		self.unsaved_changes = False
 		self.file_path_var = tk.StringVar(value="(None)")
 		
+		# Real-time update variables
+		self.token_update_job = None  # For debouncing token updates
+		self.is_executing = False  # Track if code is executing
+		
 		self.setup_styles()
 		self.create_widgets()
 
@@ -75,6 +79,8 @@ class LOLCodeInterpreterGUI:
 		)
 		self.code_editor.grid(row=1, column=0, sticky="nsew")
 		self.code_editor.bind("<<Modified>>", self.on_text_modified)
+		# Bind key release for real-time token updates
+		self.code_editor.bind("<KeyRelease>", self.on_text_changed)
 
 		# --- RIGHT PANEL: Tokens (3) + Symbols (4) ---
 		right_panel = ttk.Frame(workspace_frame)
@@ -147,18 +153,24 @@ class LOLCodeInterpreterGUI:
 	def browse_file(self):
 		file_path = filedialog.askopenfilename(filetypes=[("LOLCODE", "*.lol"), ("All files", "*.*")])
 		if file_path:
+			# Clear tables when opening a new file
+			self.clear_tables()
+			
 			self.current_file_path = file_path
 			self.file_path_var.set(file_path)
 			try:
 				with open(file_path, 'r') as f:
 					self.code_editor.delete(1.0, tk.END)
 					self.code_editor.insert(tk.END, f.read())
+				# Update tokens immediately after loading
+				self.update_tokens_realtime()
 			except Exception as e:
 				messagebox.showerror("Error", f"Failed to open file: {e}")
 		
 		self.unsaved_changes = False
 		self.code_editor.edit_modified(False)
-		self.root.title(f"LOLCODE INTERPRETER - {os.path.basename(file_path)}")
+		if file_path:
+			self.root.title(f"LOLCODE INTERPRETER - {os.path.basename(file_path)}")
 	
 	def save_changes(self):
 		target_path = self.current_file_path
@@ -216,6 +228,15 @@ class LOLCodeInterpreterGUI:
 				self.root.title(current_title + " *")
 			
 			self.code_editor.edit_modified(False)
+	
+	def on_text_changed(self, event=None):
+		"""Handle real-time token updates as user types (with debouncing)"""
+		# Cancel any pending token update
+		if self.token_update_job:
+			self.root.after_cancel(self.token_update_job)
+		
+		# Schedule token update after 500ms of inactivity (debouncing)
+		self.token_update_job = self.root.after(500, self.update_tokens_realtime)
 
 	# --- EXECUTION LOGIC ---
 	def run_code(self):
@@ -237,6 +258,7 @@ class LOLCodeInterpreterGUI:
 		execution_thread.start()
 
 	def execute_interpreter(self, code):
+		self.is_executing = True
 		try:
 			# 1. Lexer
 			tokens = list(lolcode_lexer(code))
@@ -246,16 +268,26 @@ class LOLCodeInterpreterGUI:
 			parser = Parser(tokens)
 			ast_tree = parser.parse_program()
 
-			# 3. Interpreter
-			interpreter = Interpreter(output_func=self.gui_write, input_func=self.gui_input)
+			# 3. Interpreter with real-time symbol table updates
+			interpreter = Interpreter(
+				output_func=self.gui_write, 
+				input_func=self.gui_input,
+				var_update_callback=self.on_variable_updated
+			)
 			interpreter.visit(ast_tree)
 
-			# 4. Symbol Table Update
+			# 4. Final Symbol Table Update
 			self.root.after(0, lambda: self.update_symbol_table(interpreter.variables))
 
 		except Exception as e:
 			error_message = str(e)
 			self.root.after(0, lambda: self.gui_write(f"\nERROR: {error_message}\n"))
+		finally:
+			self.is_executing = False
+	
+	def on_variable_updated(self, variables):
+		"""Callback for real-time symbol table updates during execution"""
+		self.root.after(0, lambda: self.update_symbol_table(variables))
 
 	# --- I/O METHODS ---
 	def gui_write(self, text):
@@ -276,7 +308,11 @@ class LOLCodeInterpreterGUI:
 
 		def _ask():
 			# This runs on Main Thread
-			val = simpledialog.askstring("GIMMEH", "Enter value:")
+			# Bring window to front and make sure dialog appears on top
+			self.root.lift()
+			self.root.attributes('-topmost', True)
+			val = simpledialog.askstring("GIMMEH", "Enter value:", parent=self.root)
+			self.root.attributes('-topmost', False)
 			result_container['value'] = val if val is not None else ""
 			input_event.set()
 
@@ -297,16 +333,44 @@ class LOLCodeInterpreterGUI:
 
 	def update_lexemes_table(self, tokens):
 		"""Matches (Lexeme, Classification) format"""
+		# Clear existing tokens
+		for item in self.lexemes_tree.get_children():
+			self.lexemes_tree.delete(item)
+		
+		# Insert new tokens
 		for t_type, t_val in tokens:
 			if t_type != 'EOF' and t_type != 'NEWLINE':
 				# Map technical token names to readable "Classifications" if desired
 				# For now, we just use the raw token type
 				self.lexemes_tree.insert('', 'end', values=(t_val, t_type))
+	
+	def update_tokens_realtime(self):
+		"""Update token list in real-time as user types"""
+		if self.is_executing:
+			return  # Don't update tokens during execution
+		
+		try:
+			code = self.code_editor.get(1.0, tk.END)
+			tokens = list(lolcode_lexer(code))
+			self.update_lexemes_table(tokens)
+		except Exception:
+			# Silently ignore lexer errors during typing
+			pass
 
 	def update_symbol_table(self, variables):
-		"""Matches (Identifier, Value) format"""
+		"""Matches (Identifier, Value) format - updates symbol table in real-time"""
+		# Clear existing symbols
+		for item in self.symbol_tree.get_children():
+			self.symbol_tree.delete(item)
+		
+		# Insert updated symbols
 		for name, val in variables.items():
-			self.symbol_tree.insert('', 'end', values=(name, str(val)))
+			# Format value for display
+			if val is None:
+				display_val = "NOOB"
+			else:
+				display_val = str(val)
+			self.symbol_tree.insert('', 'end', values=(name, display_val))
 
 def main():
 	root = tk.Tk()
